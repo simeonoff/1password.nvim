@@ -17,7 +17,6 @@ local M = {
     auto_load = false,
     secrets = {}, -- Format: { var_name = "Vault/Item/Field" }
     env_vars = {}, -- Format: { ENV_VAR_NAME = "var_name" } or { ENV_VAR_NAME = "Vault/Item/Field" }
-    timeout_ms = 10000, -- Default timeout for CLI operations
     debug = false, -- Enable debug output
     disable_swap_files = false,
   },
@@ -59,14 +58,42 @@ local function validate_path(secret_path)
   return true, nil
 end
 
---- Check if 1Password CLI is available in PATH asynchronously
---- @param callback function Function to call with the result (boolean)
+--- Check if 1Password CLI is available in PATH and authenticated asynchronously
+--- @param callback function Function to call with the result (boolean, string|nil)
 local function check_op_cli(callback)
-  Job:new({
-    command = 'command',
-    args = { '-v', 'op' },
-    on_exit = function(_, return_val) callback(return_val == 0) end,
-  }):start()
+  -- First check if the CLI is installed
+  Job
+    :new({
+      command = 'command',
+      args = { '-v', 'op' },
+      on_exit = function(_, return_val)
+        if return_val ~= 0 then
+          callback(false, '1Password CLI (op) not found in PATH')
+          return
+        end
+
+        -- Then check if the CLI is authenticated by running a simple command
+        Job
+          :new({
+            command = 'op',
+            args = { 'account', 'list', '--format=json' },
+            on_exit = function(j, auth_return_val)
+              if auth_return_val == 0 then
+                callback(true, nil)
+              elseif auth_return_val == 2 then
+                callback(false, "Authentication required for 1Password CLI. Please run 'op signin' in your terminal.")
+              elseif auth_return_val == 3 then
+                callback(false, 'Authentication failed for 1Password CLI. Please check your credentials.')
+              else
+                local stderr = table.concat(j:stderr_result(), '\n')
+                callback(false, 'Error checking 1Password CLI authentication: ' .. stderr)
+              end
+            end,
+          })
+          :start()
+      end,
+    })
+    :start()
 end
 
 --- Retrieve a secret from 1Password asynchronously
@@ -89,9 +116,23 @@ local function get_secret(secret_path, callback)
     on_stdout = function(_, data) debug_print('Received stdout data of length:', #data) end,
     on_stderr = function(_, data) debug_print('Received stderr data:', data) end,
     on_exit = function(j, return_val)
+
+      -- Handle different exit codes from 1Password CLI
       if return_val ~= 0 then
         local stderr = table.concat(j:stderr_result(), '\n')
-        notify('Failed to get secret for ' .. secret_path .. ': ' .. stderr, vim.log.levels.WARN)
+
+        -- Handle specific exit codes
+        if return_val == 2 then
+          notify(
+            'Authentication required for 1Password CLI. Please run "op signin" in your terminal.',
+            vim.log.levels.ERROR
+          )
+        elseif return_val == 3 then
+          notify('Authentication failed for 1Password CLI. Please check your credentials.', vim.log.levels.ERROR)
+        else
+          notify('Failed to get secret for ' .. secret_path .. ': ' .. stderr, vim.log.levels.WARN)
+        end
+
         callback(nil)
         return
       end
@@ -109,30 +150,8 @@ local function get_secret(secret_path, callback)
     end,
   })
 
-  -- Set timeout
-  local timer
-  if vim.loop.new_timer then
-    timer = vim.loop.new_timer()
-    timer:start(M._config.timeout_ms, 0, function()
-      if not job.is_shutdown then
-        job:shutdown()
-        vim.schedule(function()
-          notify('Operation timed out for: ' .. secret_path, vim.log.levels.ERROR)
-          callback(nil)
-        end)
-      end
-      timer:close()
-    end)
-  end
-
   -- Start the job
   job:start()
-
-  -- This function will be called when Neovim is shutting down
-  -- It ensures we properly clean up resources
-  job:add_on_exit_callback(function()
-    if timer and not timer:is_closing() then timer:close() end
-  end)
 end
 
 --- Set an environment variable in Neovim's process
@@ -270,10 +289,10 @@ function M.load_secrets(secrets, callback)
     return
   end
 
-  -- Check if 1Password CLI is available
-  check_op_cli(function(cli_available)
+  -- Check if 1Password CLI is available and authenticated
+  check_op_cli(function(cli_available, error_message)
     if not cli_available then
-      notify('1Password CLI (op) not found in PATH', vim.log.levels.ERROR)
+      notify(error_message or '1Password CLI error', vim.log.levels.ERROR)
       callback(false)
       return
     end
