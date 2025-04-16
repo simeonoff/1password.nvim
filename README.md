@@ -70,10 +70,7 @@ require('1password').setup({
   
   -- Notification level for messages
   notify_level = vim.log.levels.INFO,
-  
-  -- Timeout for operations in milliseconds (default: 10000)
-  timeout_ms = 5000,
-  
+
   -- Enable debug output (default: false)
   debug = false,
   
