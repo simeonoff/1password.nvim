@@ -64,8 +64,8 @@ local function check_op_cli(callback)
   -- First check if the CLI is installed
   Job
     :new({
-      command = 'command',
-      args = { '-v', 'op' },
+      command = 'which',
+      args = { 'op' },
       on_exit = function(_, return_val)
         if return_val ~= 0 then
           callback(false, '1Password CLI (op) not found in PATH')
